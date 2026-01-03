@@ -14,8 +14,8 @@ import sounddevice as sd
 from vosk import Model, KaldiRecognizer
 
 # Настройки
-WAKE_WORD = "санек"  # vosk распознаёт без ё
-WAKE_WORD_VARIANTS = ["санек", "саня", "санёк"]  # варианты написания
+WAKE_WORD = "компьютер"
+WAKE_WORD_VARIANTS = ["компьютер", "компютер"]  # варианты написания
 MODEL_PATH = "/home/jaennil/.local/share/vosk/vosk-model-small-ru-0.22"
 SAMPLE_RATE = 16000
 SILENCE_TIMEOUT = 2.0  # секунды тишины для окончания диктовки
