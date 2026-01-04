@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
 Голосовой ассистент с wake word detection.
-Постоянно слушает микрофон и реагирует на ключевое слово "санёк".
+Поддержка русского и английского языков с автоопределением.
+Wake words: "компьютер" (RU), "computer" (EN)
 """
 
 import subprocess
@@ -14,11 +15,22 @@ import sounddevice as sd
 from vosk import Model, KaldiRecognizer
 
 # Настройки
-WAKE_WORD = "компьютер"
-WAKE_WORD_VARIANTS = ["компьютер", "компютер"]  # варианты написания
-MODEL_PATH = "/home/jaennil/.local/share/vosk/vosk-model-small-ru-0.22"
 SAMPLE_RATE = 16000
 SILENCE_TIMEOUT = 2.0  # секунды тишины для окончания диктовки
+
+# Языковые настройки
+LANGUAGES = {
+    "ru": {
+        "model_path": "/home/jaennil/.local/share/vosk/vosk-model-small-ru-0.22",
+        "wake_words": ["компьютер", "компютер"],
+        "name": "Русский"
+    },
+    "en": {
+        "model_path": "/home/jaennil/.local/share/vosk/vosk-model-small-en-us-0.15",
+        "wake_words": ["computer"],
+        "name": "English"
+    }
+}
 
 # Логирование
 logging.basicConfig(
@@ -32,7 +44,7 @@ log = logging.getLogger(__name__)
 audio_queue = queue.Queue()
 
 
-def audio_callback(indata, frames, time, status):
+def audio_callback(indata, frames, time_info, status):
     """Callback для захвата аудио."""
     if status:
         log.warning(f"Audio status: {status}")
@@ -54,25 +66,21 @@ def type_text(text: str):
         log.error(f"Ошибка xdotool: {e}")
 
 
-def contains_wake_word(text: str) -> bool:
-    """Проверяет наличие wake word в тексте."""
+def check_wake_word(text: str, lang: str) -> tuple[bool, str]:
+    """Проверяет наличие wake word и возвращает (найден, остаток текста)."""
     text_lower = text.lower()
-    return any(word in text_lower for word in WAKE_WORD_VARIANTS)
-
-
-def extract_after_wake_word(text: str) -> str:
-    """Извлекает текст после wake word."""
-    text_lower = text.lower()
-    for word in WAKE_WORD_VARIANTS:
+    for word in LANGUAGES[lang]["wake_words"]:
         if word in text_lower:
             idx = text_lower.find(word)
-            return text[idx + len(word):].strip()
-    return ""
+            remainder = text[idx + len(word):].strip()
+            return True, remainder
+    return False, ""
 
 
-def listen_for_dictation(recognizer: KaldiRecognizer) -> str:
+def listen_for_dictation(recognizer: KaldiRecognizer, lang: str) -> str:
     """Слушает диктовку до 2 секунд тишины и возвращает весь текст."""
-    log.info("🎤 Слушаю диктовку (2 сек тишины для завершения)...")
+    lang_name = LANGUAGES[lang]["name"]
+    log.info(f"🎤 Слушаю диктовку [{lang_name}] (2 сек тишины для завершения)...")
     text_parts = []
     last_speech_time = time.time()
 
@@ -80,7 +88,6 @@ def listen_for_dictation(recognizer: KaldiRecognizer) -> str:
         try:
             data = audio_queue.get(timeout=0.1)
         except queue.Empty:
-            # Проверяем таймаут тишины
             if time.time() - last_speech_time >= SILENCE_TIMEOUT:
                 log.info("⏹️ 2 секунды тишины - завершаю диктовку")
                 break
@@ -90,16 +97,14 @@ def listen_for_dictation(recognizer: KaldiRecognizer) -> str:
             result = json.loads(recognizer.Result())
             text = result.get("text", "").strip()
             if text:
-                log.info(f"Распознано: '{text}'")
+                log.info(f"Распознано [{lang_name}]: '{text}'")
                 text_parts.append(text)
                 last_speech_time = time.time()
         else:
-            # Частичный результат - сбрасываем таймер тишины
             partial = json.loads(recognizer.PartialResult())
             if partial.get("partial", "").strip():
                 last_speech_time = time.time()
 
-        # Проверяем таймаут тишины
         if time.time() - last_speech_time >= SILENCE_TIMEOUT:
             log.info("⏹️ 2 секунды тишины - завершаю диктовку")
             break
@@ -108,20 +113,23 @@ def listen_for_dictation(recognizer: KaldiRecognizer) -> str:
 
 
 def main():
-    log.info("Загрузка модели...")
-    try:
-        model = Model(MODEL_PATH)
-    except Exception as e:
-        log.error(f"Не удалось загрузить модель: {e}")
-        sys.exit(1)
+    # Загрузка моделей
+    models = {}
+    recognizers = {}
 
-    recognizer = KaldiRecognizer(model, SAMPLE_RATE)
-    recognizer.SetWords(True)
+    for lang, config in LANGUAGES.items():
+        log.info(f"Загрузка модели: {config['name']}...")
+        try:
+            models[lang] = Model(config["model_path"])
+            recognizers[lang] = KaldiRecognizer(models[lang], SAMPLE_RATE)
+            recognizers[lang].SetWords(True)
+            log.info(f"  Wake words: {', '.join(config['wake_words'])}")
+        except Exception as e:
+            log.error(f"Не удалось загрузить модель {config['name']}: {e}")
+            sys.exit(1)
 
-    log.info(f"👂 Жду wake word: '{WAKE_WORD}'")
-    log.info("Варианты: " + ", ".join(WAKE_WORD_VARIANTS))
+    log.info("👂 Жду wake word: 'компьютер' (RU) или 'computer' (EN)")
 
-    # Используем pipewire для автоматического ресемплинга
     device = "pipewire"
     log.info(f"Используем аудио устройство: {device}")
 
@@ -140,35 +148,49 @@ def main():
                 except queue.Empty:
                     continue
 
-                if recognizer.AcceptWaveform(data):
-                    result = json.loads(recognizer.Result())
-                    text = result.get("text", "").strip()
+                # Проверяем оба языка
+                detected_lang = None
+                remainder = ""
 
-                    if text:
-                        log.info(f"Услышал: '{text}'")
+                for lang, rec in recognizers.items():
+                    if rec.AcceptWaveform(data):
+                        result = json.loads(rec.Result())
+                        text = result.get("text", "").strip()
 
-                    if contains_wake_word(text):
-                        log.info("✨ Wake word обнаружен!")
+                        if text:
+                            log.info(f"Услышал [{LANGUAGES[lang]['name']}]: '{text}'")
 
-                        # Собираем весь текст
-                        all_text_parts = []
+                        found, rem = check_wake_word(text, lang)
+                        if found:
+                            detected_lang = lang
+                            remainder = rem
+                            break
 
-                        # Проверяем, есть ли текст после wake word
-                        remainder = extract_after_wake_word(text)
-                        if remainder:
-                            all_text_parts.append(remainder)
+                if detected_lang:
+                    lang_name = LANGUAGES[detected_lang]["name"]
+                    log.info(f"✨ Wake word обнаружен! Язык: {lang_name}")
 
-                        # Слушаем дальнейшую диктовку
-                        dictation = listen_for_dictation(recognizer)
-                        if dictation:
-                            all_text_parts.append(dictation)
+                    # Создаём свежий распознаватель для диктовки
+                    dict_recognizer = KaldiRecognizer(models[detected_lang], SAMPLE_RATE)
+                    dict_recognizer.SetWords(True)
 
-                        # Печатаем всё сразу
-                        full_text = " ".join(all_text_parts)
-                        if full_text:
-                            type_text(full_text)
+                    all_text_parts = []
+                    if remainder:
+                        all_text_parts.append(remainder)
 
-                        log.info(f"👂 Жду wake word: '{WAKE_WORD}'")
+                    dictation = listen_for_dictation(dict_recognizer, detected_lang)
+                    if dictation:
+                        all_text_parts.append(dictation)
+
+                    full_text = " ".join(all_text_parts)
+                    if full_text:
+                        type_text(full_text)
+
+                    # Сбрасываем распознаватели
+                    for rec in recognizers.values():
+                        rec.Reset()
+
+                    log.info("👂 Жду wake word: 'компьютер' (RU) или 'computer' (EN)")
 
     except KeyboardInterrupt:
         log.info("Завершение работы...")
